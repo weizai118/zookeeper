@@ -10,6 +10,12 @@ AM_CPPFLAGS = -I${srcdir}/include -I${srcdir}/tests -I${srcdir}/generated $(SOLA
 AM_CFLAGS = -Wall -Werror -Wdeclaration-after-statement
 AM_CXXFLAGS = -Wall $(USEIPV6)
 
+# Additional flags for coverage testing (if enabled)
+if ENABLEGCOV
+  AM_CFLAGS += -fprofile-arcs -ftest-coverage
+  AM_LDFLAGS = -lgcov
+endif
+
 LIB_LDFLAGS = -no-undefined -version-info 2 $(SOLARIS_LIB_LDFLAGS)
 
 pkginclude_HEADERS = include/zookeeper.h include/zookeeper_version.h include/zookeeper_log.h include/proto.h include/recordio.h generated/zookeeper.jute.h
@@ -92,7 +98,7 @@ TEST_SOURCES = \
 	tests/TestZookeeperClose.cc \
 	tests/TestReconfig.cc \
 	tests/TestReconfigServer.cc \
-    tests/TestClientRetry.cc \
+	tests/TestClientRetry.cc \
 	tests/TestOperations.cc \
 	tests/TestMulti.cc \
 	tests/TestWatchers.cc \
@@ -100,6 +106,7 @@ TEST_SOURCES = \
 	tests/ZooKeeperQuorumServer.cc \
 	tests/ZooKeeperQuorumServer.h \
 	tests/TestReadOnlyClient.cc \
+	tests/TestLogClientEnv.cc \
 	$(NULL)
 
 if SOLARIS

@@ -41,7 +41,7 @@ if test "$CALLER" = "ANT" ; then
 CPPUNIT_CFLAGS="$CPPUNIT_CFLAGS -DZKSERVER_CMD=\"\\\"${base_dir}/src/c/tests/zkServer.sh\\\"\""
 else
 CPPUNIT_CFLAGS="$CPPUNIT_CFLAGS -DZKSERVER_CMD=\"\\\"./tests/zkServer.sh\\\"\""
-AC_CHECK_FILES([generated/zookeeper.jute.c generated/zookeeper.jute.h],[],
+AC_CHECK_FILES([$srcdir/generated/zookeeper.jute.c $srcdir/generated/zookeeper.jute.h],[],
     [AC_MSG_ERROR([jute files are missing! Please run "ant compile_jute" while in the zookeeper top level directory.])
 ])
 fi
@@ -85,6 +85,12 @@ else
         CXXFLAGS="-g -O2"
     fi
 fi
+
+# Check whether to enable gcov (coverage test)
+AC_ARG_ENABLE(gcov, [AS_HELP_STRING([--enable-gcov],[enable coverage test])])
+AC_MSG_CHECKING([whether to enable gcov])
+AS_IF([test "x${enable_gcov}" = "xyes"],AC_MSG_RESULT([yes]),AC_MSG_RESULT([no]))
+AM_CONDITIONAL([ENABLEGCOV],[test "x${enable_gcov}" = "xyes"])
 
 AC_ARG_WITH([syncapi],
  [AS_HELP_STRING([--with-syncapi],[build with support for SyncAPI [default=yes]])],

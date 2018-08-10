@@ -253,16 +253,23 @@ static void cleanup_bufs(zhandle_t *zh,int callCompletion,int rc);
 static int disable_conn_permute=0; // permute enabled by default
 static struct sockaddr_storage *addr_rw_server = 0;
 
-static __attribute__((unused)) void print_completion_queue(zhandle_t *zh);
-
 static void *SYNCHRONOUS_MARKER = (void*)&SYNCHRONOUS_MARKER;
 static int isValidPath(const char* path, const int flags);
+
+static int aremove_watches(
+    zhandle_t *zh, const char *path, ZooWatcherType wtype,
+    watcher_fn watcher, void *watcherCtx, int local,
+    void_completion_t *completion, const void *data, int all);
 
 #ifdef THREADED
 static void process_sync_completion(zhandle_t *zh,
         completion_list_t *cptr,
         struct sync_completion *sc,
         struct iarchive *ia);
+
+static int remove_watches(
+    zhandle_t *zh, const char *path, ZooWatcherType wtype,
+    watcher_fn watcher, void *watcherCtx, int local, int all);
 #endif
 
 #ifdef _WIN32
@@ -803,7 +810,7 @@ static int resolve_hosts(const zhandle_t *zh, const char *hosts_in, addrvec_t *a
                 LOG_ERROR(LOGCALLBACK(zh), "getaddrinfo: %s\n", strerror(errno));
 #endif
                 rc=ZSYSTEMERROR;
-                goto fail;
+                goto next;
             }
         }
 
@@ -835,11 +842,16 @@ static int resolve_hosts(const zhandle_t *zh, const char *hosts_in, addrvec_t *a
         }
 
         freeaddrinfo(res0);
-
+next:
         host = strtok_r(0, ",", &strtok_last);
         }
 #endif
     }
+    if (avec->count == 0) {
+      rc = ZSYSTEMERROR; // not a single host resolved
+      goto fail;
+    }
+
     free(hosts);
 
     if(!disable_conn_permute){
@@ -1132,7 +1144,10 @@ static zhandle_t *zookeeper_init_internal(const char *host, watcher_fn watcher,
 
     // Set log callback before calling into log_env
     zh->log_callback = log_callback;
-    log_env(zh);
+
+    if (!(flags & ZOO_NO_LOG_CLIENTENV)) {
+        log_env(zh);
+    }
 
 #ifdef _WIN32
     if (Win32WSAStartup()){
@@ -1748,7 +1763,7 @@ static void cleanup(zhandle_t *zh,int rc)
     cleanup_bufs(zh,1,rc);
     zh->fd = -1;
 
-    LOG_DEBUG(LOGCALLBACK(zh), "Previous connection=[%s] delay=%d", zoo_get_current_server(zh), zh->delay);
+    LOG_DEBUG(LOGCALLBACK(zh), "Previous connection=%s delay=%d", zoo_get_current_server(zh), zh->delay);
 
     if (!is_unrecoverable(zh)) {
         zh->state = 0;
@@ -1777,7 +1792,7 @@ static int handle_socket_error_msg(zhandle_t *zh, int line, int rc,
         va_start(va,format);
         vsnprintf(buf, sizeof(buf)-1,format,va);
         log_message(LOGCALLBACK(zh), ZOO_LOG_LEVEL_ERROR,line,__func__,
-            "Socket [%s] zk retcode=%d, errno=%d(%s): %s",
+            "Socket %s zk retcode=%d, errno=%d(%s): %s",
             zoo_get_current_server(zh),rc,errno,strerror(errno),buf);
         va_end(va);
     }
@@ -2320,7 +2335,7 @@ int zookeeper_interest(zhandle_t *zh, socket_t *fd, int *interest,
                 }
 
                 LOG_INFO(LOGCALLBACK(zh),
-                         "Initiated connection to server [%s]",
+                         "Initiated connection to server %s",
                          format_endpoint_info(&zh->addr_cur));
             }
             *tv = get_timeval(zh->recv_timeout/3);
@@ -2436,7 +2451,7 @@ static int check_events(zhandle_t *zh, int events)
         if((rc=prime_connection(zh))!=0)
             return rc;
 
-        LOG_INFO(LOGCALLBACK(zh), "initiated connection to server [%s]", format_endpoint_info(&zh->addr_cur));
+        LOG_INFO(LOGCALLBACK(zh), "initiated connection to server %s", format_endpoint_info(&zh->addr_cur));
         return ZOK;
     }
     if (zh->to_send.head && (events&ZOOKEEPER_WRITE)) {
@@ -2485,7 +2500,7 @@ static int check_events(zhandle_t *zh, int events)
                       ZOO_READONLY_STATE : ZOO_CONNECTED_STATE;
                     zh->reconfig = 0;
                     LOG_INFO(LOGCALLBACK(zh),
-                             "session establishment complete on server [%s], sessionId=%#llx, negotiated timeout=%d %s",
+                             "session establishment complete on server %s, sessionId=%#llx, negotiated timeout=%d %s",
                              format_endpoint_info(&zh->addr_cur),
                              newid, zh->recv_timeout,
                              zh->primer_storage.readOnly ? "(READ-ONLY mode)" : "");
@@ -2519,26 +2534,6 @@ int api_epilog(zhandle_t *zh,int rc)
     if(inc_ref_counter(zh,-1)==0 && zh->close_requested!=0)
         zookeeper_close(zh);
     return rc;
-}
-
-static __attribute__((unused)) void print_completion_queue(zhandle_t *zh)
-{
-    completion_list_t* cptr;
-
-    if(logLevel<ZOO_LOG_LEVEL_DEBUG) return;
-
-    fprintf(LOGSTREAM,"Completion queue: ");
-    if (zh->sent_requests.head==0) {
-        fprintf(LOGSTREAM,"empty\n");
-        return;
-    }
-
-    cptr=zh->sent_requests.head;
-    while(cptr){
-        fprintf(LOGSTREAM,"%d,",cptr->xid);
-        cptr=cptr->next;
-    }
-    fprintf(LOGSTREAM,"end\n");
 }
 
 //#ifdef THREADED
@@ -3223,7 +3218,7 @@ int zookeeper_close(zhandle_t *zh)
     if (is_connected(zh)){
         struct oarchive *oa;
         struct RequestHeader h = {get_xid(), ZOO_CLOSE_OP};
-        LOG_INFO(LOGCALLBACK(zh), "Closing zookeeper sessionId=%#llx to [%s]\n",
+        LOG_INFO(LOGCALLBACK(zh), "Closing zookeeper sessionId=%#llx to %s\n",
                 zh->client_id.client_id,zoo_get_current_server(zh));
         oa = create_buffer_oarchive();
         rc = serialize_RequestHeader(oa, "header", &h);
@@ -4018,16 +4013,26 @@ int zoo_amulti(zhandle_t *zh, int count, const zoo_op_t *ops,
     return (rc < 0) ? ZMARSHALLINGERROR : ZOK;
 }
 
+typedef union WatchesRequest WatchesRequest;
 
-int zoo_aremove_watchers(zhandle_t *zh, const char *path, ZooWatcherType wtype,
+union WatchesRequest {
+    struct CheckWatchesRequest check;
+    struct RemoveWatchesRequest remove;
+};
+
+static int aremove_watches(
+        zhandle_t *zh, const char *path, ZooWatcherType wtype,
         watcher_fn watcher, void *watcherCtx, int local,
-        void_completion_t *completion, const void *data)
+        void_completion_t *completion, const void *data, int all)
 {
     char *server_path = prepend_string(zh, path);
     int rc;
     struct oarchive *oa;
-    struct RequestHeader h = { get_xid(), ZOO_REMOVE_WATCHES };
-    struct RemoveWatchesRequest req =  { (char*)server_path, wtype };
+    struct RequestHeader h = { 
+        get_xid(), 
+        all ? ZOO_REMOVE_WATCHES : ZOO_CHECK_WATCHES 
+    };
+    WatchesRequest req;
     watcher_deregistration_t *wdo;
 
     if (!zh || !isValidPath(server_path, 0)) {
@@ -4056,21 +4061,32 @@ int zoo_aremove_watchers(zhandle_t *zh, const char *path, ZooWatcherType wtype,
 
     oa = create_buffer_oarchive();
     rc = serialize_RequestHeader(oa, "header", &h);
-    rc = rc < 0 ? rc : serialize_RemoveWatchesRequest(oa, "req", &req);
+
+    if (all) {
+       req.remove.path = (char*)server_path;
+       req.remove.type = wtype;
+       rc = rc < 0 ? rc : serialize_RemoveWatchesRequest(oa, "req", &req.remove);
+    } else {
+        req.check.path = (char*)server_path;
+        req.check.type = wtype;
+        rc = rc < 0 ? rc : serialize_CheckWatchesRequest(oa, "req", &req.check);
+    }
+
     if (rc < 0) {
         goto done;
     }
 
-    wdo = create_watcher_deregistration(server_path, watcher, watcherCtx,
-                                        wtype);
+    wdo = create_watcher_deregistration(
+        server_path, watcher, watcherCtx, wtype);
+
     if (!wdo) {
         rc = ZSYSTEMERROR;
         goto done;
     }
 
     enter_critical(zh);
-    rc = add_completion_deregistration(zh, h.xid, COMPLETION_VOID,
-                                       completion, data, 0, wdo, 0);
+    rc = add_completion_deregistration(
+        zh, h.xid, COMPLETION_VOID, completion, data, 0, wdo, 0);
     rc = rc < 0 ? rc : queue_buffer_bytes(&zh->to_send, get_buffer(oa),
             get_buffer_len(oa));
     rc = rc < 0 ? ZMARSHALLINGERROR : ZOK;
@@ -4238,6 +4254,10 @@ const char* zerror(int c)
       return "bad arguments";
     case ZINVALIDSTATE:
       return "invalid zhandle state";
+    case ZNEWCONFIGNOQUORUM:
+      return "no quorum of new config is connected and up-to-date with the leader of last commmitted config - try invoking reconfiguration after new servers are connected and synced";
+    case ZRECONFIGINPROGRESS:
+      return "Another reconfiguration is in progress -- concurrent reconfigs not supported (yet)";
     case ZAPIERROR:
       return "api error";
     case ZNONODE:
@@ -4268,10 +4288,12 @@ const char* zerror(int c)
       return "session moved to another server, so operation is ignored";
     case ZNOTREADONLY:
       return "state-changing request is passed to read-only server";
-   case ZNEWCONFIGNOQUORUM:
-       return "no quorum of new config is connected and up-to-date with the leader of last commmitted config - try invoking reconfiguration after new servers are connected and synced";
-   case ZRECONFIGINPROGRESS:
-     return "Another reconfiguration is in progress -- concurrent reconfigs not supported (yet)";
+    case ZEPHEMERALONLOCALSESSION:
+      return "attempt to create ephemeral node on a local session";
+    case ZNOWATCHER:
+      return "the watcher couldn't be found";
+    case ZRECONFIGDISABLED:
+      return "attempts to perform a reconfiguration operation when reconfiguration feature is disable";
     }
     if (c > 0) {
       return strerror(c);
@@ -4327,8 +4349,10 @@ int zoo_add_auth(zhandle_t *zh,const char* scheme,const char* cert,
 static const char* format_endpoint_info(const struct sockaddr_storage* ep)
 {
     static char buf[128] = { 0 };
-    char addrstr[128] = { 0 };
+    char addrstr[INET6_ADDRSTRLEN] = { 0 };
+    const char *fmtstring;
     void *inaddr;
+    char is_inet6 = 0;  // poor man's boolean
 #ifdef _WIN32
     char * addrstring;
 #endif
@@ -4340,6 +4364,7 @@ static const char* format_endpoint_info(const struct sockaddr_storage* ep)
     if(ep->ss_family==AF_INET6){
         inaddr=&((struct sockaddr_in6*)ep)->sin6_addr;
         port=((struct sockaddr_in6*)ep)->sin6_port;
+        is_inet6 = 1;
     } else {
 #endif
         inaddr=&((struct sockaddr_in*)ep)->sin_addr;
@@ -4347,12 +4372,13 @@ static const char* format_endpoint_info(const struct sockaddr_storage* ep)
 #if defined(AF_INET6)
     }
 #endif
+    fmtstring = (is_inet6 ? "[%s]:%d" : "%s:%d");
 #ifdef _WIN32
     addrstring = inet_ntoa (*(struct in_addr*)inaddr);
-    sprintf(buf,"%s:%d",addrstring,ntohs(port));
+    sprintf(buf,fmtstring,addrstring,ntohs(port));
 #else
     inet_ntop(ep->ss_family,inaddr,addrstr,sizeof(addrstr)-1);
-    sprintf(buf,"%s:%d",addrstr,ntohs(port));
+    sprintf(buf,fmtstring,addrstr,ntohs(port));
 #endif
     return buf;
 }
@@ -4816,11 +4842,12 @@ int zoo_set_acl(zhandle_t *zh, const char *path, int version,
     return rc;
 }
 
-int zoo_remove_watchers(zhandle_t *zh, const char *path, ZooWatcherType wtype,
-         watcher_fn watcher, void *watcherCtx, int local)
+static int remove_watches(
+    zhandle_t *zh, const char *path, ZooWatcherType wtype,
+    watcher_fn watcher, void *wctx, int local, int all)
 {
-    struct sync_completion *sc;
     int rc = 0;
+    struct sync_completion *sc;
 
     if (!path)
         return ZBADARGUMENTS;
@@ -4829,8 +4856,8 @@ int zoo_remove_watchers(zhandle_t *zh, const char *path, ZooWatcherType wtype,
     if (!sc)
         return ZSYSTEMERROR;
 
-    rc = zoo_aremove_watchers(zh, path, wtype, watcher, watcherCtx, local,
-                              SYNCHRONOUS_MARKER, sc);
+    rc = aremove_watches(zh, path, wtype, watcher, wctx, local,
+                              SYNCHRONOUS_MARKER, sc, all);
     if (rc == ZOK) {
         wait_sync_completion(sc);
         rc = sc->rc;
@@ -4857,4 +4884,33 @@ int zoo_multi(zhandle_t *zh, int count, const zoo_op_t *ops, zoo_op_result_t *re
 
     return rc;
 }
+
+int zoo_remove_watches(zhandle_t *zh, const char *path, ZooWatcherType wtype,
+         watcher_fn watcher, void *watcherCtx, int local)
+{
+    return remove_watches(zh, path, wtype, watcher, watcherCtx, local, 0);
+}
+
+int zoo_remove_all_watches(
+        zhandle_t *zh, const char *path, ZooWatcherType wtype, int local)
+{
+    return remove_watches(zh, path, wtype, NULL, NULL, local, 1);
+
+}
 #endif
+
+int zoo_aremove_watches(zhandle_t *zh, const char *path, ZooWatcherType wtype,
+        watcher_fn watcher, void *watcherCtx, int local,
+        void_completion_t *completion, const void *data)
+{
+    return aremove_watches(
+        zh, path, wtype, watcher, watcherCtx, local, completion, data, 0);
+}
+
+int zoo_aremove_all_watches(zhandle_t *zh, const char *path,
+        ZooWatcherType wtype, int local, void_completion_t *completion,
+        const void *data)
+{
+    return aremove_watches(
+        zh, path, wtype, NULL, NULL, local, completion, data, 1);
+}
